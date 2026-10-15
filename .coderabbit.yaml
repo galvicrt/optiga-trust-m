@@ -255,11 +255,11 @@ reviews:
           defeated by fault injection. Do NOT fail on trivial, minor, non-security, or
           purely functional issues.
       # mutually_exclusive_groups guarantees at MOST one risk label, not at least one. This
-      # error-mode check supplies the missing at-least-one guarantee, so every PR carries
-      # exactly one. It blocks an unlabeled PR from merging once request_changes_workflow is
-      # enabled (repo config) or the check is a required status in branch protection.
+      # check flags a PR that ends up with none. It runs in warning mode because the check
+      # can't read PR label metadata and otherwise reports inconclusive; auto_apply_labels
+      # plus the risk:low fallback provide the at-least-one guarantee in practice.
       - name: "Risk Label Present"
-        mode: error
+        mode: warning
         instructions: >-
           Fail when the PR carries none of risk:high, risk:medium, or risk:low. Every PR
           must end up with exactly one risk label; the labeling_instructions fallback should
