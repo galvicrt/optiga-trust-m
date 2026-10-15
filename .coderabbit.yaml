@@ -190,6 +190,38 @@ reviews:
       instructions: Apply when files under extras/pal/ or include/pal/ change.
     - label: "comms"
       instructions: Apply when files under src/comms/ change.
+    - label: "risk:high"
+      instructions: >-
+        Apply when the PR touches a security-sensitive surface. Mirror the Security Gate's
+        scope: cryptographic operations or their inputs (keys, IVs/nonces, MACs, signatures,
+        random numbers), key/secret or session-state handling, OID metadata, access
+        conditions or lifecycle state, Shielded Connection / protection levels, chip
+        authentication or protected (firmware/data) update, parsing or bounds checks on
+        data from the I2C/UART bus or OPTIGA responses, memory safety in src/ or
+        extras/pal/, host crypto backends (pal_crypt_*), or security defaults in
+        optiga_lib_config*.h. Examples count by what they demonstrate: an example that
+        implements crypto or key handling is risk:high.
+    - label: "risk:medium"
+      instructions: >-
+        Apply for functional changes with moderate blast radius that are NOT
+        security-sensitive: command/util service logic, I2C timing, retry or power
+        management behaviour, PAL port behaviour (timers, GPIO, locks, OS integration),
+        public API or ABI changes, and build-system (CMake) changes.
+    - label: "risk:low"
+      instructions: >-
+        Fallback for everything else: docs, tests, comments, formatting, CI/config
+        files, licensing metadata, or examples that don't touch crypto or key handling.
+        Apply whenever neither risk:high nor risk:medium fits, so every PR carries
+        exactly one risk label.
+
+  # Labels are applied, not just suggested, so the "Risk Label Present" check can pass.
+  auto_apply_labels: true
+  # At most one risk label per PR; "Risk Label Present" enforces at least one.
+  mutually_exclusive_groups:
+    risk:
+      - "risk:high"
+      - "risk:medium"
+      - "risk:low"
 
   finishing_touches:
     docstrings:
@@ -208,6 +240,31 @@ reviews:
     issue_assessment:
       mode: warning
     custom_checks:
+      - name: "Security Gate"
+        mode: error
+        instructions: >-
+          Fail this check only when the review finds SECURITY-RELATED major or critical
+          issues, for example: buffer overflows or out-of-bounds reads/writes on data from
+          the bus, OPTIGA responses or callers; integer overflow in length arithmetic;
+          cryptographic misuse (predictable or reused IVs/nonces, MACs that don't cover all
+          fields, decrypt-before-verify / padding oracles, non-constant-time comparison of
+          secrets, weak algorithms or key sizes); keys, secrets or plaintext committed to
+          code or written to logs; secrets not zeroized; replay-protection bypass;
+          protection-level downgrade on the Shielded Connection; widened OID access
+          conditions or unintended lifecycle changes; or security decisions trivially
+          defeated by fault injection. Do NOT fail on trivial, minor, non-security, or
+          purely functional issues.
+      # mutually_exclusive_groups guarantees at MOST one risk label, not at least one. This
+      # error-mode check supplies the missing at-least-one guarantee, so every PR carries
+      # exactly one. It blocks an unlabeled PR from merging once request_changes_workflow is
+      # enabled (repo config) or the check is a required status in branch protection.
+      - name: "Risk Label Present"
+        mode: error
+        instructions: >-
+          Fail when the PR carries none of risk:high, risk:medium, or risk:low. Every PR
+          must end up with exactly one risk label; the labeling_instructions fallback should
+          make this pass automatically, and this check blocks any PR that slips through
+          unlabeled.
       - name: "Bounds-checked external lengths (SC-MEM-01)"
         mode: error
         instructions: |
