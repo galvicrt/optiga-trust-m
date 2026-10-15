@@ -1,0 +1,295 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit configuration for the OPTIGA™ Trust M host library.
+# Embedded C (C99), security-controller host stack: I2C protocol layers,
+# command/crypto APIs, platform abstraction (PAL) ports, and examples.
+language: en-US
+tone_instructions: >-
+  Review like a senior embedded-security engineer for secure elements. Cite rule
+  IDs from docs/SECURE_CODING_RULES.md plus CWE/CERT C IDs, and state the
+  concrete attack or failure on a device for each issue.
+
+reviews:
+  profile: assertive
+  request_changes_workflow: true
+  high_level_summary: true
+  review_status: true
+  collapse_walkthrough: false
+  sequence_diagrams: true
+  estimate_code_review_effort: true
+  poem: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "main"
+      - "develop"
+      - "release/.*"
+
+  # Vendored third-party code, generated data and binaries are not reviewed.
+  path_filters:
+    - "!external/**"
+    - "!docs/images/**"
+    - "!examples/tools/protected_update_data_set/bin/**"
+    - "!examples/tools/protected_update_data_set/samples/**"
+    - "!examples/tools/protected_update_data_set/visual_studio/**"
+    - "!**/*.bin"
+    - "!**/*.dat"
+
+  tools:
+    # C/C++ static analysis
+    cppcheck:
+      enabled: true
+    clang:
+      enabled: true
+    semgrep:
+      enabled: true
+    ast-grep:
+      essential_rules: true
+    # Secrets / supply chain
+    gitleaks:
+      enabled: true
+    osvScanner:
+      enabled: true
+    # Build, scripts, docs
+    shellcheck:
+      enabled: true
+    actionlint:
+      enabled: true
+    yamllint:
+      enabled: true
+    markdownlint:
+      enabled: true
+
+  path_instructions:
+    - path: "**/*.{c,h}"
+      instructions: |
+        C99 for resource-constrained MCUs (XMC, PSoC, ESP32, Zephyr, Linux hosts)
+        talking to an OPTIGA Trust M secure element. Products built on this code
+        go through Common Criteria, IEC 62443 and EU CRA assessments, so put
+        security and memory-safety defects ahead of style:
+        - Bounds: every externally sourced length (bus frame, OPTIGA response,
+          record header, caller arg) checked against source AND destination
+          size before memcpy/index (SC-MEM-01..04, CWE-120/125/787).
+          Include padding, tags and headers in the check. Watch uint16/uint8
+          truncation and unsigned wrap in length sums (CWE-190/197).
+        - In-out length params: capacity checked before writing, set to 0 on error.
+        - Error handling: every optiga_*/pal_* status checked; the
+          do { } while (FALSE) + break pattern must free instances/locks on all
+          paths; status vars start as an error value (SC-ERR-01/02).
+        - Undefined behaviour: signed shifts, unaligned casts of uint8_t* to
+          wider types, strict aliasing, uninitialised reads, out-of-range
+          enum values.
+        - MISRA C:2012 mindset: no dynamic allocation in library code, no
+          recursion, explicit casts on narrowing, no side effects in
+          conditions. Respect existing PC-lint suppressions; flag new
+          suppressions that don't have a justification.
+        - Concurrency: callbacks set volatile status; busy-waits on target
+          need a timeout; instance_state BUSY handling (SC-CON-01, SC-ERR-04).
+        For every issue give the failing input (bytes/lengths/sequence) and a
+        corrected snippet.
+
+    - path: "{src,examples,extras}/**/*.c"
+      instructions: |
+        Cryptographic usage review (SC-CRY-*). Flag:
+        - Non-constant-time comparison of MACs, tags, signatures or secrets
+          (memcmp, early-exit loops), CWE-208.
+        - Predictable or reused IVs/nonces; CBC IVs must come from
+          optiga_crypt_random(OPTIGA_RNG_TYPE_TRNG, ...); CCM/GCM nonce reuse
+          under one key (CWE-329/323).
+        - MAC-then-encrypt, decrypt-before-verify, MACs that don't cover the
+          header/length/IV/sequence, distinguishable padding vs MAC errors
+          (padding oracle, CWE-347/354).
+        - Replay checks that accept equal counters or use unauthenticated counters.
+        - Secrets/plaintext left in stack or static buffers without zeroization
+          on every exit path; memset that the optimizer can remove (CWE-14/226).
+        - Weak primitives in new code: ECB > 1 block, SHA-1, RSA < 2048,
+          ECC < 256 bits, PKCS#1 v1.5 encryption (SC-CRY-07).
+        - Secrets reaching any logger or printf (SC-CRY-08).
+        - Single-point security decisions an attacker could flip with a glitch
+          (SC-ERR-03): suggest redundant checks / non-trivial success values.
+
+    - path: "src/comms/**"
+      instructions: |
+        IFX I2C protocol stack (physical, data link, transport, presentation
+        layers, Shielded Connection). All bytes received from the bus are
+        attacker-controlled (an interposer on the I2C lines is in the threat
+        model). Check:
+        - Frame length / FCS (CRC) validation before the payload is used;
+          the CRC polynomial and init value must not change.
+        - Sequence numbers, retransmission and resynchronisation logic: no
+          state confusion, no infinite retry loops, timers always stopped.
+        - Shielded Connection (presentation layer): protection level must never
+          silently downgrade (OPTIGA_COMMS_FULL_PROTECTION ->
+          NO_PROTECTION) on error or re-init; nonce/sequence counter must not
+          reuse values across session re-establishment; session keys
+          zeroized on close/hibernate.
+        - Fragmentation/reassembly buffers: total length bounded by
+          the configured maximum.
+
+    - path: "src/{cmd,crypt,util}/**"
+      instructions: |
+        Command layer and public crypt/util services. Check that APDU-style
+        command buffers are sized for the worst-case input; response lengths
+        reported by OPTIGA are bounds-checked against caller buffers before
+        copy; OIDs and key IDs are validated against allowed ranges;
+        metadata writes don't widen access conditions or advance the
+        lifecycle state (LcsO) by accident (SC-CRY-09); and strict-sequence APIs
+        (*_start/*_update/*_finalize) can't be interleaved or left locked.
+
+    - path: "include/**/*.h"
+      instructions: |
+        Public API and configuration headers. Check ABI/API compatibility
+        (struct layout, enum values, function signatures), accurate Doxygen
+        (\param, \retval, \pre), LIBRARY_EXPORTS and extern "C" guards,
+        and include guards. In optiga_lib_config*.h flag any default that
+        weakens security, such as lower OPTIGA_COMMS_DEFAULT_PROTECTION_LEVEL or
+        logging enabled by default (SC-API-01/02).
+
+    - path: "extras/pal/**"
+      instructions: |
+        Platform abstraction ports (Linux, Zephyr, FreeRTOS, ESP32, XMC4800,
+        libusb, Windows/Linux UART) and host crypto backends (OpenSSL,
+        wolfSSL, PSA). Check I2C/UART timeouts and error propagation, ISR vs
+        task context (no blocking in ISRs), lock correctness, file
+        descriptor/handle leaks, and that pal_crypt_* backends check every
+        library return code, use the correct key/IV lengths and free contexts.
+        New ports must follow extras/pal/NEW_PAL_TEMPLATE.
+
+    - path: "examples/**"
+      instructions: |
+        Customers copy examples straight into products, so hold them to
+        production security standards. Hardcoded keys/secrets are acceptable
+        only when clearly labelled as demo values. Metadata with
+        Execute/Change = Always on secret objects needs a comment explaining
+        why. Every new example must be registered in examples/optiga_shell.c
+        under the same feature #if guards as the example itself.
+
+    - path: "tests/**"
+      instructions: |
+        Unit and integration tests. Ask for negative-path coverage of new
+        parsing or crypto code: truncated frames, oversized length fields,
+        wrong MAC/tag, replayed sequence numbers, OPTIGA error responses.
+
+    - path: "**/{CMakeLists.txt,*.cmake}"
+      instructions: |
+        Build configuration. Flag removal of warning flags or hardening
+        options (-Wall -Wextra, -fstack-protector, _FORTIFY_SOURCE), new
+        dependencies that aren't pinned, and feature macros enabled that
+        differ from optiga_lib_config.h defaults.
+
+  labeling_instructions:
+    - label: "security"
+      instructions: >-
+        Apply when the PR touches cryptographic operations, key/secret handling,
+        OID metadata/access conditions, Shielded Connection, or bounds checks
+        on externally sourced data.
+    - label: "api-change"
+      instructions: Apply when any public header under include/ changes a function signature, struct, enum or macro.
+    - label: "pal"
+      instructions: Apply when files under extras/pal/ or include/pal/ change.
+    - label: "comms"
+      instructions: Apply when files under src/comms/ change.
+
+  finishing_touches:
+    docstrings:
+      enabled: true
+    unit_tests:
+      enabled: true
+
+  pre_merge_checks:
+    title:
+      mode: warning
+    description:
+      mode: warning
+    docstrings:
+      mode: warning
+      threshold: 80
+    issue_assessment:
+      mode: warning
+    custom_checks:
+      - name: "Bounds-checked external lengths (SC-MEM-01)"
+        mode: error
+        instructions: |
+          In added or modified C code, find every length or offset read from
+          an external source (bus frame, OPTIGA response, record/packet header,
+          or a caller-supplied length parameter) that is used in a copy,
+          array index, or pointer arithmetic.
+          Pass: each one is checked against both the source buffer length and
+          the destination capacity before use, including padding/header/tag
+          bytes, with no integer wrap or truncation.
+          Fail: list each unchecked length with file, line, the buffer it can
+          overrun, and an example value that triggers it.
+      - name: "Constant-time secret compare (SC-CRY-01)"
+        mode: error
+        instructions: |
+          In added or modified code, find comparisons of MACs, tags,
+          signatures, hashes of secrets, or secret values.
+          Pass: all such comparisons are constant-time.
+          Fail: any use of memcmp, strcmp, or an early-exit loop on such
+          data. Name the file, line and compared buffers.
+      - name: "Verify before decrypt (SC-CRY-04)"
+        mode: error
+        instructions: |
+          For any added or modified code that combines encryption with a MAC
+          or uses an AEAD:
+          Pass: the MAC/tag covers header, length, sequence number, IV and
+          ciphertext, and is verified before decryption output is used or
+          released to the caller; failure paths return a single
+          indistinguishable error.
+          Fail: MAC computed over a subset of fields, decrypt/unpad before
+          verification, plaintext written to caller buffers before
+          verification, or distinct padding vs MAC errors. Explain the attack.
+      - name: "IV / nonce generation (SC-CRY-03)"
+        mode: error
+        instructions: |
+          For added or modified code that supplies an IV or nonce to an
+          encryption call:
+          Pass: CBC IVs come from the TRNG (optiga_crypt_random with
+          OPTIGA_RNG_TYPE_TRNG); counter-based nonces are used only for
+          CTR/CCM/GCM and are provably unique per key.
+          Fail: constant, zero, counter-derived CBC IVs, or nonces that can
+          repeat (e.g. reset on reboot). Name the file and line.
+      - name: "Secrets zeroized on all paths (SC-CRY-02)"
+        mode: warning
+        instructions: |
+          For added or modified functions that hold keys, shared secrets,
+          plaintext, or session state in local or static buffers:
+          Pass: the buffers are wiped with a non-elidable memset before
+          every return, including error paths.
+          Fail: list each buffer and the exit path where it isn't cleared.
+      - name: "Security defaults not weakened (SC-API-02)"
+        mode: error
+        instructions: |
+          Pass: the PR doesn't lower OPTIGA_COMMS_DEFAULT_PROTECTION_LEVEL,
+          doesn't disable OPTIGA_COMMS_SHIELDED_CONNECTION where it was
+          enabled, doesn't enable logging of payloads by default, and doesn't
+          widen OID access conditions in library (non-example) code.
+          Fail: describe each weakened default and its location.
+      - name: "SPDX / REUSE headers (SC-LIC-01)"
+        mode: error
+        instructions: |
+          Pass: every newly added source, header, CMake or script file starts
+          with SPDX-FileCopyrightText and SPDX-License-Identifier lines, or
+          its path is covered by .reuse/dep5.
+          Fail: list each file that is missing them.
+      - name: "Public API change documented (SC-API-01)"
+        mode: warning
+        instructions: |
+          If any function signature, struct, enum or public macro in
+          include/*.h is added, removed or changed:
+          Pass: CHANGELOG.md is updated in the same PR and Doxygen \param /
+          \retval blocks match the new signature.
+          Fail: list the changed symbols that aren't documented.
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  learnings:
+    scope: local
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - files: "docs/SECURE_CODING_RULES.md"
+        applyTo: "src/**, include/**, extras/**, examples/**, tests/**"
