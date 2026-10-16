@@ -10,7 +10,7 @@ tone_instructions: >-
   concrete attack or failure on a device for each issue.
 
 reviews:
-  profile: assertive
+  profile: chill
   request_changes_workflow: true
   high_level_summary: true
   review_status: true
