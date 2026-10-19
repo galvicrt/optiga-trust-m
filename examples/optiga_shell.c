@@ -67,6 +67,7 @@ extern void example_optiga_crypt_hkdf(void);
 extern void example_optiga_crypt_symmetric_generate_key(void);
 extern void example_optiga_hmac_verify_with_authorization_reference(void);
 extern void example_optiga_crypt_clear_auto_state(void);
+extern void example_optiga_secure_sensor_record(void);
 
 extern pal_logger_t logger_console;
 /**
@@ -682,6 +683,23 @@ static void optiga_shell_crypt_hmac_verify_with_authorization_reference(void) {
 }
 #endif
 
+#if defined(OPTIGA_CRYPT_SYM_ENCRYPT_ENABLED) && defined(OPTIGA_CRYPT_SYM_DECRYPT_ENABLED) \
+    && defined(OPTIGA_CRYPT_HMAC_ENABLED)
+static void optiga_shell_secure_sensor_record(void) {
+#ifndef OPTIGA_INIT_DEINIT_DONE_EXCLUSIVELY
+    OPTIGA_SHELL_LOG_MESSAGE("Initializing OPTIGA for example demonstration...");
+#endif
+    OPTIGA_SHELL_LOG_MESSAGE("Starting secure sensor record Example");
+    OPTIGA_SHELL_LOG_MESSAGE("1 Step: Generate AES-128 session key and provision HMAC secret");
+    OPTIGA_SHELL_LOG_MESSAGE("2 Step: Seal sensor reading (AES-128 CBC + HMAC-SHA256)");
+    OPTIGA_SHELL_LOG_MESSAGE("3 Step: Open sealed record and verify");
+#ifndef OPTIGA_INIT_DEINIT_DONE_EXCLUSIVELY
+    OPTIGA_SHELL_LOG_MESSAGE("4 Step: Close the application on OPTIGA");
+#endif
+    example_optiga_secure_sensor_record();
+}
+#endif
+
 #if defined(OPTIGA_CRYPT_GENERATE_AUTH_CODE_ENABLED) && defined(OPTIGA_CRYPT_HMAC_VERIFY_ENABLED) \
     && defined(OPTIGA_CRYPT_CLEAR_AUTO_STATE_ENABLED)
 static void optiga_shell_crypt_clear_auto_state(void) {
@@ -782,6 +800,10 @@ static void optiga_shell_selftest(void) {
 #endif
 #if defined(OPTIGA_CRYPT_GENERATE_AUTH_CODE_ENABLED) && defined(OPTIGA_CRYPT_HMAC_VERIFY_ENABLED)
     run_example(optiga_shell_crypt_hmac_verify_with_authorization_reference);
+#endif
+#if defined(OPTIGA_CRYPT_SYM_ENCRYPT_ENABLED) && defined(OPTIGA_CRYPT_SYM_DECRYPT_ENABLED) \
+    && defined(OPTIGA_CRYPT_HMAC_ENABLED)
+    run_example(optiga_shell_secure_sensor_record);
 #endif
 #ifdef OPTIGA_INIT_DEINIT_DONE_EXCLUSIVELY
     run_example(optiga_shell_deinit);
@@ -918,6 +940,12 @@ optiga_example_cmd_t optiga_cmds[] = {
     {"    hmac verify                              : optiga --",
      "hmacverify",
      optiga_shell_crypt_hmac_verify_with_authorization_reference},
+#endif
+#if defined(OPTIGA_CRYPT_SYM_ENCRYPT_ENABLED) && defined(OPTIGA_CRYPT_SYM_DECRYPT_ENABLED) \
+    && defined(OPTIGA_CRYPT_HMAC_ENABLED)
+    {"    secure sensor record                     : optiga --",
+     "sensorrecord",
+     optiga_shell_secure_sensor_record},
 #endif
 };
 

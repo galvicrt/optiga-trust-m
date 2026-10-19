@@ -17,6 +17,21 @@ The list of available Host Applications, Platform and current status can be foun
 | [OPTIGA™ Trust M Matter integration](https://github.com/project-chip/connectedhomeip/tree/master/examples/lock-app/infineon/psoc6#building-with-optiga-trust-m-as-hsm) | Linux            | Active |
 | [OPTIGA™ Trust M Zephyr PAL & Application](https://github.com/Infineon/optiga-trust-m-zephyr)                                                                          | Zephyr           | Active |
 
+## Secure sensor record example: persistent provisioning changes
+
+[`example_optiga_secure_sensor_record`](optiga/usecases/example_optiga_secure_sensor_record.c)
+is intended only for disposable test devices. Its provisioning helper changes shared
+object `0xF1D0` to **Execute = Always** and **type = Pre-shared secret**, then erases
+and replaces its contents with a **public, hardcoded sample HMAC secret**. This can
+break other examples or applications that use the same object.
+
+These writes persist after completion, errors, and application close. In particular,
+a successful metadata write remains even if the subsequent secret write fails.
+The example does not save or restore the previous metadata or secret. A general
+rollback cannot recover an overwritten secret when the object's read policy prevents
+reading it. Before reusing the device, reprovision `0xF1D0` with the intended secret
+and access policy using your device's provisioning procedure.
+
 # Troubleshooting
 
 ## 0x107 (handshake error)
