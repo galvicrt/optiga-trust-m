@@ -294,6 +294,14 @@ optiga_lib_status_t sensor_record_open(
  * Write the HMAC secret to 0xF1D0 with
  * Execute access condition = Always
  * Data object type  =  Pre-shared secret
+ *
+ * WARNING: This persistently changes shared object 0xF1D0. Successful metadata writes
+ * remain in effect even if writing the secret or a later example operation fails.
+ * The erase-and-write replaces any existing secret with the public sample below.
+ * Neither the previous metadata nor the previous secret is saved or restored.
+ * A general rollback cannot recover a previous secret that its read policy hides.
+ * Use only a disposable test device; reprovision 0xF1D0 with the intended secret and
+ * access policy before using it with other examples or applications.
  */
 static optiga_lib_status_t sensor_record_provision_hmac_secret(void) {
     optiga_lib_status_t return_status = !OPTIGA_LIB_SUCCESS;
@@ -371,6 +379,11 @@ static optiga_lib_status_t sensor_record_provision_hmac_secret(void) {
 /**
  * The below example demonstrates sealing a sensor reading into an authenticated, encrypted record
  * and opening it again on the receiving side.
+ *
+ * WARNING: Use only a disposable test device. This example persistently overwrites
+ * shared object 0xF1D0 with a public sample HMAC secret and sets Execute = Always
+ * and the object type to Pre-shared secret. Closing the application does not undo
+ * these writes; see sensor_record_provision_hmac_secret() for recovery guidance.
  *
  * Example for
  *  #optiga_crypt_symmetric_encrypt,
