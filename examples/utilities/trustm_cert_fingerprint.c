@@ -16,8 +16,6 @@
 
 #include "trustm_cert_fingerprint.h"
 
-#include <string.h>
-
 #include "optiga_crypt.h"
 #include "optiga_util.h"
 #include "pal_os_lock.h"
@@ -49,6 +47,9 @@ typedef struct trustm_cert_fingerprint_ctx {
     hash_data_from_host_t hash_input;
     /// Digest computed by OPTIGA, copied to the caller on success
     uint8_t digest[TRUSTM_CERT_FINGERPRINT_LENGTH];
+    /// Instances kept after a timeout, released by #trustm_cert_fingerprint_reset
+    optiga_util_t *abandoned_util;
+    optiga_crypt_t *abandoned_crypt;
 } trustm_cert_fingerprint_ctx_t;
 
 static trustm_cert_fingerprint_ctx_t trustm_cert_fingerprint_ctx;
@@ -56,7 +57,24 @@ static trustm_cert_fingerprint_ctx_t trustm_cert_fingerprint_ctx;
 static volatile bool_t trustm_cert_fingerprint_busy = FALSE;
 
 static void trustm_cert_fingerprint_callback(void *context, optiga_lib_status_t return_status) {
+    pal_os_lock_enter_critical_section();
     ((trustm_cert_fingerprint_ctx_t *)context)->status = return_status;
+    pal_os_lock_exit_critical_section();
+}
+
+static void trustm_cert_fingerprint_set_status(optiga_lib_status_t status) {
+    pal_os_lock_enter_critical_section();
+    trustm_cert_fingerprint_ctx.status = status;
+    pal_os_lock_exit_critical_section();
+}
+
+static optiga_lib_status_t trustm_cert_fingerprint_get_status(void) {
+    optiga_lib_status_t status;
+
+    pal_os_lock_enter_critical_section();
+    status = trustm_cert_fingerprint_ctx.status;
+    pal_os_lock_exit_critical_section();
+    return status;
 }
 
 /**
@@ -74,6 +92,12 @@ static bool_t trustm_cert_fingerprint_acquire(void) {
     return acquired;
 }
 
+static void trustm_cert_fingerprint_release(void) {
+    pal_os_lock_enter_critical_section();
+    trustm_cert_fingerprint_busy = FALSE;
+    pal_os_lock_exit_critical_section();
+}
+
 /**
  * Wait for an asynchronous OPTIGA operation started with api_status and return its result.
  * Sets *timed_out when the operation did not complete within TRUSTM_CERT_FINGERPRINT_TIMEOUT_MS.
@@ -86,7 +110,7 @@ trustm_cert_fingerprint_wait(optiga_lib_status_t api_status, bool_t *timed_out) 
         return api_status;
     }
     start_time = pal_os_timer_get_time_in_milliseconds();
-    while (OPTIGA_LIB_BUSY == trustm_cert_fingerprint_ctx.status) {
+    while (OPTIGA_LIB_BUSY == trustm_cert_fingerprint_get_status()) {
         // Unsigned subtraction keeps the comparison correct across timer wrap-around
         if ((pal_os_timer_get_time_in_milliseconds() - start_time)
             >= TRUSTM_CERT_FINGERPRINT_TIMEOUT_MS) {
@@ -94,13 +118,28 @@ trustm_cert_fingerprint_wait(optiga_lib_status_t api_status, bool_t *timed_out) 
             return OPTIGA_UTIL_ERROR;
         }
     }
-    return trustm_cert_fingerprint_ctx.status;
+    return trustm_cert_fingerprint_get_status();
 }
 
-void trustm_cert_fingerprint_reset(void) {
-    pal_os_lock_enter_critical_section();
-    trustm_cert_fingerprint_busy = FALSE;
-    pal_os_lock_exit_critical_section();
+optiga_lib_status_t trustm_cert_fingerprint_reset(void) {
+    trustm_cert_fingerprint_ctx_t *ctx = &trustm_cert_fingerprint_ctx;
+    optiga_lib_status_t return_status = OPTIGA_LIB_SUCCESS;
+
+    // OPTIGA has been re-initialized, so the abandoned operation can no longer complete
+    if (NULL != ctx->abandoned_crypt) {
+        if (OPTIGA_LIB_SUCCESS != optiga_crypt_destroy(ctx->abandoned_crypt)) {
+            return OPTIGA_UTIL_ERROR;
+        }
+        ctx->abandoned_crypt = NULL;
+    }
+    if (NULL != ctx->abandoned_util) {
+        if (OPTIGA_LIB_SUCCESS != optiga_util_destroy(ctx->abandoned_util)) {
+            return OPTIGA_UTIL_ERROR;
+        }
+        ctx->abandoned_util = NULL;
+    }
+    trustm_cert_fingerprint_release();
+    return return_status;
 }
 
 optiga_lib_status_t trustm_get_cert_fingerprint(uint16_t cert_oid, uint8_t *fingerprint) {
@@ -127,7 +166,7 @@ optiga_lib_status_t trustm_get_cert_fingerprint(uint16_t cert_oid, uint8_t *fing
 
         // Read the certificate
         ctx->cert_length = sizeof(ctx->cert);
-        ctx->status = OPTIGA_LIB_BUSY;
+        trustm_cert_fingerprint_set_status(OPTIGA_LIB_BUSY);
         return_status = trustm_cert_fingerprint_wait(
             optiga_util_read_data(me_util, cert_oid, 0, ctx->cert, &ctx->cert_length),
             &timed_out
@@ -155,7 +194,7 @@ optiga_lib_status_t trustm_get_cert_fingerprint(uint16_t cert_oid, uint8_t *fing
         ctx->hash_input.length = der_length;
 
         // Hash the DER certificate on OPTIGA
-        ctx->status = OPTIGA_LIB_BUSY;
+        trustm_cert_fingerprint_set_status(OPTIGA_LIB_BUSY);
         return_status = trustm_cert_fingerprint_wait(
             optiga_crypt_hash(
                 me_crypt,
@@ -176,6 +215,8 @@ optiga_lib_status_t trustm_get_cert_fingerprint(uint16_t cert_oid, uint8_t *fing
     if (TRUE == timed_out) {
         // The pending operation may still complete and use the instances and ctx buffers.
         // Keep the instances and leave the utility locked until trustm_cert_fingerprint_reset().
+        ctx->abandoned_util = me_util;
+        ctx->abandoned_crypt = me_crypt;
         return OPTIGA_UTIL_ERROR;
     }
 
@@ -189,7 +230,7 @@ optiga_lib_status_t trustm_get_cert_fingerprint(uint16_t cert_oid, uint8_t *fing
             return_status = OPTIGA_UTIL_ERROR;
         }
     }
-    trustm_cert_fingerprint_busy = FALSE;
+    trustm_cert_fingerprint_release();
     return return_status;
 }
 
@@ -221,6 +262,9 @@ optiga_lib_status_t trustm_verify_cert_fingerprint(
     uint16_t expected_length
 ) {
     uint8_t fingerprint[TRUSTM_CERT_FINGERPRINT_LENGTH];
+    volatile uint8_t forward_diff = 0;
+    volatile uint8_t backward_diff = 0;
+    uint16_t index;
     optiga_lib_status_t return_status;
 
     if ((NULL == expected) || (expected_length < TRUSTM_CERT_FINGERPRINT_MIN_PIN_LENGTH)
@@ -233,11 +277,21 @@ optiga_lib_status_t trustm_verify_cert_fingerprint(
         return return_status;
     }
 
-    // Compare the pinned fingerprint (or its leading prefix)
-    if (0 != memcmp(fingerprint, expected, expected_length)) {
+    // Compare the pinned fingerprint (or its leading prefix) twice, in opposite directions with
+    // independent accumulators, so a single skipped instruction cannot turn a mismatch into a match
+    for (index = 0; index < expected_length; index++) {
+        forward_diff |= (uint8_t)(fingerprint[index] ^ expected[index]);
+    }
+    for (index = expected_length; index > 0; index--) {
+        backward_diff |= (uint8_t)(fingerprint[index - 1] ^ expected[index - 1]);
+    }
+    if (0 != forward_diff) {
         return OPTIGA_UTIL_ERROR;
     }
-    return OPTIGA_LIB_SUCCESS;
+    if (0 != backward_diff) {
+        return OPTIGA_UTIL_ERROR;
+    }
+    return ((0 == forward_diff) && (0 == backward_diff)) ? OPTIGA_LIB_SUCCESS : OPTIGA_UTIL_ERROR;
 }
 
 #endif  // OPTIGA_CRYPT_HASH_ENABLED

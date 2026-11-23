@@ -66,13 +66,16 @@ extern "C" {
 optiga_lib_status_t trustm_get_cert_fingerprint(uint16_t cert_oid, uint8_t *fingerprint);
 
 /**
- * \brief Unlocks the utility after an operation timeout.
+ * \brief Releases the instances kept after an operation timeout and unlocks the utility.
  *
  * \details
  * Call this only after OPTIGA has been reset and re-initialized, so that no operation started by
  * the utility can still complete.
+ *
+ * \retval      #OPTIGA_LIB_SUCCESS     Utility unlocked
+ * \retval      #OPTIGA_UTIL_ERROR      An instance could not be released; the utility stays locked
  */
-void trustm_cert_fingerprint_reset(void);
+optiga_lib_status_t trustm_cert_fingerprint_reset(void);
 
 /**
  * \brief Formats a fingerprint as colon-separated uppercase hex ("AA:BB:...:FF").
