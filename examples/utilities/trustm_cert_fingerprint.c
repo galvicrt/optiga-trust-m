@@ -20,6 +20,9 @@
 
 #include "optiga_crypt.h"
 #include "optiga_util.h"
+#include "pal_os_lock.h"
+#include "pal_os_memory.h"
+#include "pal_os_timer.h"
 
 #ifdef OPTIGA_CRYPT_HASH_ENABLED
 
@@ -31,86 +34,150 @@
 #define TRUSTM_CERT_MAX_LENGTH (1728U)
 
 /**
- * Callback when optiga_util_xxxx / optiga_crypt_xxxx operation is completed asynchronously
+ * State of the fingerprint operation in progress. It is static so that an OPTIGA operation that
+ * completes late (after a timeout) only writes to memory owned by this module, never to a
+ * caller's buffer or stack. Access is serialized through the busy flag.
  */
-static volatile optiga_lib_status_t trustm_cert_fingerprint_status;
+typedef struct trustm_cert_fingerprint_ctx {
+    /// Completion status written by the OPTIGA callback
+    volatile optiga_lib_status_t status;
+    /// Certificate read from OPTIGA
+    uint8_t cert[TRUSTM_CERT_MAX_LENGTH];
+    /// Certificate length, updated by OPTIGA when the read completes
+    uint16_t cert_length;
+    /// Hash input descriptor, read by OPTIGA while hashing
+    hash_data_from_host_t hash_input;
+    /// Digest computed by OPTIGA, copied to the caller on success
+    uint8_t digest[TRUSTM_CERT_FINGERPRINT_LENGTH];
+} trustm_cert_fingerprint_ctx_t;
 
-// lint --e{818} suppress "argument "context" is not used in the sample provided"
+static trustm_cert_fingerprint_ctx_t trustm_cert_fingerprint_ctx;
+/// TRUE while a call is in progress, or after a timeout until #trustm_cert_fingerprint_reset
+static volatile bool_t trustm_cert_fingerprint_busy = FALSE;
+
 static void trustm_cert_fingerprint_callback(void *context, optiga_lib_status_t return_status) {
-    trustm_cert_fingerprint_status = return_status;
-    if (NULL != context) {
-        // callback to upper layer here
-    }
+    ((trustm_cert_fingerprint_ctx_t *)context)->status = return_status;
 }
 
 /**
- * Wait for an asynchronous OPTIGA operation started with api_status and return its result
+ * Atomically claim the utility. Returns TRUE if the caller now owns it.
  */
-static optiga_lib_status_t trustm_cert_fingerprint_wait(optiga_lib_status_t api_status) {
+static bool_t trustm_cert_fingerprint_acquire(void) {
+    bool_t acquired = FALSE;
+
+    pal_os_lock_enter_critical_section();
+    if (FALSE == trustm_cert_fingerprint_busy) {
+        trustm_cert_fingerprint_busy = TRUE;
+        acquired = TRUE;
+    }
+    pal_os_lock_exit_critical_section();
+    return acquired;
+}
+
+/**
+ * Wait for an asynchronous OPTIGA operation started with api_status and return its result.
+ * Sets *timed_out when the operation did not complete within TRUSTM_CERT_FINGERPRINT_TIMEOUT_MS.
+ */
+static optiga_lib_status_t
+trustm_cert_fingerprint_wait(optiga_lib_status_t api_status, bool_t *timed_out) {
+    uint32_t start_time;
+
     if (OPTIGA_LIB_SUCCESS != api_status) {
         return api_status;
     }
-    while (OPTIGA_LIB_BUSY == trustm_cert_fingerprint_status) {
+    start_time = pal_os_timer_get_time_in_milliseconds();
+    while (OPTIGA_LIB_BUSY == trustm_cert_fingerprint_ctx.status) {
+        // Unsigned subtraction keeps the comparison correct across timer wrap-around
+        if ((pal_os_timer_get_time_in_milliseconds() - start_time)
+            >= TRUSTM_CERT_FINGERPRINT_TIMEOUT_MS) {
+            *timed_out = TRUE;
+            return OPTIGA_UTIL_ERROR;
+        }
     }
-    return trustm_cert_fingerprint_status;
+    return trustm_cert_fingerprint_ctx.status;
+}
+
+void trustm_cert_fingerprint_reset(void) {
+    pal_os_lock_enter_critical_section();
+    trustm_cert_fingerprint_busy = FALSE;
+    pal_os_lock_exit_critical_section();
 }
 
 optiga_lib_status_t trustm_get_cert_fingerprint(uint16_t cert_oid, uint8_t *fingerprint) {
-    // Static to keep the certificate off the stack of small MCUs
-    static uint8_t cert[TRUSTM_CERT_MAX_LENGTH];
-    uint16_t cert_length = sizeof(cert);
-    hash_data_from_host_t hash_input;
+    trustm_cert_fingerprint_ctx_t *ctx = &trustm_cert_fingerprint_ctx;
     uint32_t der_length;
+    bool_t timed_out = FALSE;
     optiga_util_t *me_util = NULL;
     optiga_crypt_t *me_crypt = NULL;
     optiga_lib_status_t return_status = OPTIGA_UTIL_ERROR;
 
-    do {
-        if (NULL == fingerprint) {
-            break;
-        }
+    if (NULL == fingerprint) {
+        return OPTIGA_UTIL_ERROR;
+    }
+    if (FALSE == trustm_cert_fingerprint_acquire()) {
+        return OPTIGA_UTIL_ERROR_INSTANCE_IN_USE;
+    }
 
-        me_util = optiga_util_create(0, trustm_cert_fingerprint_callback, NULL);
-        me_crypt = optiga_crypt_create(0, trustm_cert_fingerprint_callback, NULL);
+    do {
+        me_util = optiga_util_create(0, trustm_cert_fingerprint_callback, ctx);
+        me_crypt = optiga_crypt_create(0, trustm_cert_fingerprint_callback, ctx);
         if ((NULL == me_util) || (NULL == me_crypt)) {
             break;
         }
 
         // Read the certificate
-        trustm_cert_fingerprint_status = OPTIGA_LIB_BUSY;
+        ctx->cert_length = sizeof(ctx->cert);
+        ctx->status = OPTIGA_LIB_BUSY;
         return_status = trustm_cert_fingerprint_wait(
-            optiga_util_read_data(me_util, cert_oid, 0, cert, &cert_length)
+            optiga_util_read_data(me_util, cert_oid, 0, ctx->cert, &ctx->cert_length),
+            &timed_out
         );
         if (OPTIGA_LIB_SUCCESS != return_status) {
             break;
         }
 
         // Remove the TLS identity header if present
-        if ((cert_length > TRUSTM_CERT_TLS_IDENTITY_HEADER_LENGTH)
-            && (TRUSTM_CERT_TLS_IDENTITY_TAG == cert[0])) {
-            der_length = ((uint32_t)cert[6] << 16) | ((uint32_t)cert[7] << 8) | cert[8];
+        if ((ctx->cert_length > TRUSTM_CERT_TLS_IDENTITY_HEADER_LENGTH)
+            && (TRUSTM_CERT_TLS_IDENTITY_TAG == ctx->cert[0])) {
+            der_length =
+                ((uint32_t)ctx->cert[6] << 16) | ((uint32_t)ctx->cert[7] << 8) | ctx->cert[8];
             if ((0 == der_length)
-                || (der_length > (uint32_t)(cert_length - TRUSTM_CERT_TLS_IDENTITY_HEADER_LENGTH))) {
+                || (der_length
+                    > (uint32_t)(ctx->cert_length - TRUSTM_CERT_TLS_IDENTITY_HEADER_LENGTH))) {
                 return_status = OPTIGA_UTIL_ERROR;
                 break;
             }
-            hash_input.buffer = &cert[TRUSTM_CERT_TLS_IDENTITY_HEADER_LENGTH];
+            ctx->hash_input.buffer = &ctx->cert[TRUSTM_CERT_TLS_IDENTITY_HEADER_LENGTH];
         } else {
-            der_length = cert_length;
-            hash_input.buffer = cert;
+            der_length = ctx->cert_length;
+            ctx->hash_input.buffer = ctx->cert;
         }
-        hash_input.length = der_length;
+        ctx->hash_input.length = der_length;
 
         // Hash the DER certificate on OPTIGA
-        trustm_cert_fingerprint_status = OPTIGA_LIB_BUSY;
-        return_status = trustm_cert_fingerprint_wait(optiga_crypt_hash(
-            me_crypt,
-            OPTIGA_HASH_TYPE_SHA_256,
-            OPTIGA_CRYPT_HOST_DATA,
-            &hash_input,
-            fingerprint
-        ));
+        ctx->status = OPTIGA_LIB_BUSY;
+        return_status = trustm_cert_fingerprint_wait(
+            optiga_crypt_hash(
+                me_crypt,
+                OPTIGA_HASH_TYPE_SHA_256,
+                OPTIGA_CRYPT_HOST_DATA,
+                &ctx->hash_input,
+                ctx->digest
+            ),
+            &timed_out
+        );
+        if (OPTIGA_LIB_SUCCESS != return_status) {
+            break;
+        }
+
+        pal_os_memcpy(fingerprint, ctx->digest, TRUSTM_CERT_FINGERPRINT_LENGTH);
     } while (FALSE);
+
+    if (TRUE == timed_out) {
+        // The pending operation may still complete and use the instances and ctx buffers.
+        // Keep the instances and leave the utility locked until trustm_cert_fingerprint_reset().
+        return OPTIGA_UTIL_ERROR;
+    }
 
     if (me_crypt) {
         if (OPTIGA_LIB_SUCCESS != optiga_crypt_destroy(me_crypt)) {
@@ -122,6 +189,7 @@ optiga_lib_status_t trustm_get_cert_fingerprint(uint16_t cert_oid, uint8_t *fing
             return_status = OPTIGA_UTIL_ERROR;
         }
     }
+    trustm_cert_fingerprint_busy = FALSE;
     return return_status;
 }
 
@@ -155,7 +223,8 @@ optiga_lib_status_t trustm_verify_cert_fingerprint(
     uint8_t fingerprint[TRUSTM_CERT_FINGERPRINT_LENGTH];
     optiga_lib_status_t return_status;
 
-    if ((NULL == expected) || (expected_length > TRUSTM_CERT_FINGERPRINT_LENGTH)) {
+    if ((NULL == expected) || (expected_length < TRUSTM_CERT_FINGERPRINT_MIN_PIN_LENGTH)
+        || (expected_length > TRUSTM_CERT_FINGERPRINT_LENGTH)) {
         return OPTIGA_UTIL_ERROR;
     }
 
