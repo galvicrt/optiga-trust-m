@@ -1,3 +1,8 @@
+## Unreleased
+
+* Added certificate fingerprint utility (trustm_cert_fingerprint.c) to compute, print and pin the SHA-256 fingerprint of the device certificate
+* Added certificate fingerprint use case example, available in the optiga shell as `optiga --certfp`
+
 ## 5.8.3 (2026-09-14)
 
 * Added boundary checking to validate CalcSign response length in optiga_cmd.c 
