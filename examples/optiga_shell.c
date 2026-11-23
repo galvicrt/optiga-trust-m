@@ -67,6 +67,7 @@ extern void example_optiga_crypt_hkdf(void);
 extern void example_optiga_crypt_symmetric_generate_key(void);
 extern void example_optiga_hmac_verify_with_authorization_reference(void);
 extern void example_optiga_crypt_clear_auto_state(void);
+extern void example_optiga_cert_fingerprint(void);
 
 extern pal_logger_t logger_console;
 /**
@@ -682,6 +683,22 @@ static void optiga_shell_crypt_hmac_verify_with_authorization_reference(void) {
 }
 #endif
 
+#ifdef OPTIGA_CRYPT_HASH_ENABLED
+static void optiga_shell_cert_fingerprint(void) {
+#ifndef OPTIGA_INIT_DEINIT_DONE_EXCLUSIVELY
+    OPTIGA_SHELL_LOG_MESSAGE("Initializing OPTIGA for example demonstration...");
+#endif
+    OPTIGA_SHELL_LOG_MESSAGE("Starting certificate fingerprint Example");
+    OPTIGA_SHELL_LOG_MESSAGE("1 Step: Read the device certificate from OID(0xE0E0)");
+    OPTIGA_SHELL_LOG_MESSAGE("2 Step: Compute and print the SHA-256 fingerprint");
+    OPTIGA_SHELL_LOG_MESSAGE("3 Step: Verify against the pinned fingerprint");
+#ifndef OPTIGA_INIT_DEINIT_DONE_EXCLUSIVELY
+    OPTIGA_SHELL_LOG_MESSAGE("4 Step: Close the application on OPTIGA");
+#endif
+    example_optiga_cert_fingerprint();
+}
+#endif
+
 #if defined(OPTIGA_CRYPT_GENERATE_AUTH_CODE_ENABLED) && defined(OPTIGA_CRYPT_HMAC_VERIFY_ENABLED) \
     && defined(OPTIGA_CRYPT_CLEAR_AUTO_STATE_ENABLED)
 static void optiga_shell_crypt_clear_auto_state(void) {
@@ -782,6 +799,9 @@ static void optiga_shell_selftest(void) {
 #endif
 #if defined(OPTIGA_CRYPT_GENERATE_AUTH_CODE_ENABLED) && defined(OPTIGA_CRYPT_HMAC_VERIFY_ENABLED)
     run_example(optiga_shell_crypt_hmac_verify_with_authorization_reference);
+#endif
+#ifdef OPTIGA_CRYPT_HASH_ENABLED
+    run_example(optiga_shell_cert_fingerprint);
 #endif
 #ifdef OPTIGA_INIT_DEINIT_DONE_EXCLUSIVELY
     run_example(optiga_shell_deinit);
@@ -918,6 +938,11 @@ optiga_example_cmd_t optiga_cmds[] = {
     {"    hmac verify                              : optiga --",
      "hmacverify",
      optiga_shell_crypt_hmac_verify_with_authorization_reference},
+#endif
+#ifdef OPTIGA_CRYPT_HASH_ENABLED
+    {"    certificate fingerprint                  : optiga --",
+     "certfp",
+     optiga_shell_cert_fingerprint},
 #endif
 };
 
